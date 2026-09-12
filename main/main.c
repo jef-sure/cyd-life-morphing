@@ -26,7 +26,7 @@ enum
     CYD_TFT_RST       = GPIO_NUM_NC,
     CYD_TFT_BACKLIGHT = GPIO_NUM_21,
     CYD_TFT_SPI_HOST  = SPI2_HOST,
-    CYD_TFT_SPI_HZ    = 40 * 1000 * 1000,
+    CYD_TFT_SPI_HZ    = 40 * 1000 * 1000
 };
 
 static const char *TAG = "cyd-life-morphing";
@@ -131,12 +131,57 @@ LifeGeneration *create_initial_navy_life()
     return life;
 }
 
+LifeGeneration *create_initial_gliders_life()
+{
+    const int        width           = 20;
+    const int        height          = 15;
+    static const int live_cells[][2] = {
+        {3,  2 },
+        {4,  3 },
+        {2,  4 },
+        {3,  4 },
+        {4,  4 },
+        {16, 2 },
+        {15, 3 },
+        {15, 4 },
+        {16, 4 },
+        {17, 4 },
+        {3,  10},
+        {4,  10},
+        {4,  11},
+        {2,  12},
+        {4,  12},
+        {15, 10},
+        {16, 10},
+        {17, 10},
+        {15, 11},
+        {16, 12},
+    };
+
+    LifeGeneration *life = create_life(width, height);
+    if (life == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < sizeof(live_cells) / sizeof(live_cells[0]); i++) {
+        int x                                 = live_cells[i][0];
+        int y                                 = live_cells[i][1];
+        life->cells[CELL_OFFSET(x, y, width)] = 1;
+    }
+    return life;
+}
+
 static inline int min_int(int a, int b)
 {
     return a < b ? a : b;
 }
 
 static inline int max_int(int a, int b)
+{
+    return a > b ? a : b;
+}
+
+static inline float max_float(float a, float b)
 {
     return a > b ? a : b;
 }
@@ -148,188 +193,247 @@ typedef struct
 
 typedef struct
 {
-    Point pos;
-    int   intensity; // 0..255
-} GlowPoint;
+    Point start;
+    Point end;
+} Segment;
 
 typedef struct
 {
-    int        cell_size;
-    int        radius;
-    int        width;  // pixels
-    int        height; // pixels
-    uint8_t   *lum;
-    GlowPoint *glow;
-    int        glow_capacity;
-} LifeRenderer;
+    int     count;
+    Segment segments[8];
+} SegmentsInCell;
 
-static Point cell_center(int x, int y, int cell_size)
-{
-    return (Point){x * cell_size + cell_size / 2, y * cell_size + cell_size / 2};
-}
+typedef LifeGeneration *(*life_creation_func_t)();
 
-static Point gravity_motion(Point source, Point target, float t)
+typedef struct
 {
-    int   dx   = target.x - source.x;
-    int   dy   = target.y - source.y;
-    float dist = sqrtf((float)dx * dx + (float)dy * dy);
-    if (dist < 0.001f) {
-        return source;
+    LifeGeneration      *current;
+    LifeGeneration      *next;
+    int                  cell_width;
+    int                  grid_width;
+    int                  grid_height;
+    int                  radius;
+    int                  rlut_limit;
+    int                 *rlut;
+    dgx_screen_t        *vscreen;
+    uint8_t             *glow_next;
+    uint8_t             *glow_prev;
+    uint8_t             *source_used;
+    life_creation_func_t life_creation_func;
+} LifeTransformation;
+
+static bool life_transformation_init(LifeTransformation *transformation, LifeGeneration *current, int screen_width, int screen_height,
+                                     int max_cell_width)
+{
+    memset(transformation, 0, sizeof(*transformation));
+    transformation->current     = current;
+    transformation->cell_width  = min_int(max_cell_width, min_int(screen_width / current->width, screen_height / current->height));
+    transformation->grid_width  = transformation->cell_width * current->width;
+    transformation->grid_height = transformation->cell_width * current->height;
+    transformation->radius      = transformation->cell_width / 2 + transformation->cell_width / 4;
+    transformation->rlut_limit  = transformation->radius * transformation->radius;
+
+    transformation->vscreen = dgx_vscreen_init(transformation->grid_width, transformation->grid_height, 16, DgxScreenRGB);
+    if (transformation->vscreen == NULL) {
+        memset(transformation, 0, sizeof(*transformation));
+        return false;
     }
 
-    float nx     = (float)dx / dist;
-    float ny     = (float)dy / dist;
-    float travel = dist * t;
-
-    return (Point){source.x + (int)(nx * travel), source.y + (int)(ny * travel)};
-}
-
-static int gravity_intensity(float distance, float gravity_strength)
-{
-    float force = distance / (1.0f + gravity_strength * 0.12f);
-    float value = 32.0f + force * 8.5f;
-    if (value > 255.0f) value = 255.0f;
-    if (value < 0.0f) value = 0.0f;
-    return (int)value;
-}
-
-static bool life_renderer_init(LifeRenderer *r, int screen_width, int screen_height, int cells_x, int cells_y)
-{
-    int cell_size = min_int(screen_width / cells_x, screen_height / cells_y);
-    if (cell_size % 2 == 0) cell_size--; // odd size gives an exact center pixel
-    r->cell_size     = cell_size;
-    r->radius        = cell_size / 2;
-    r->width         = cell_size * cells_x;
-    r->height        = cell_size * cells_y;
-    r->glow_capacity = cells_x * cells_y * 8; // a cell contributes at most one point per neighbor
-    r->lum           = malloc(r->width * r->height);
-    r->glow          = malloc(r->glow_capacity * sizeof(GlowPoint));
-    if (r->lum == NULL || r->glow == NULL) {
-        free(r->lum);
-        free(r->glow);
+    transformation->glow_prev   = calloc(transformation->grid_width * transformation->grid_height, sizeof(uint8_t));
+    transformation->glow_next   = calloc(transformation->grid_width * transformation->grid_height, sizeof(uint8_t));
+    transformation->source_used = calloc((current->width * current->height + 7) / 8, sizeof(uint8_t));
+    transformation->rlut        = malloc(transformation->rlut_limit * sizeof(int));
+    if (transformation->rlut == NULL || transformation->glow_prev == NULL || transformation->glow_next == NULL ||
+        transformation->source_used == NULL) {
+        dgx_screen_destroy(&transformation->vscreen);
+        free(transformation->rlut);
+        free(transformation->glow_prev);
+        free(transformation->glow_next);
+        free(transformation->source_used);
+        memset(transformation, 0, sizeof(*transformation));
         return false;
+    }
+
+    for (int i = 0; i < transformation->rlut_limit; i++) {
+        float x                 = (float)i / transformation->rlut_limit;
+        transformation->rlut[i] = 255.0f * (1 - 3 * x * x + 2 * x * x * x);
     }
     return true;
 }
 
-static void life_renderer_free(LifeRenderer *r)
+static void life_transformation_free(LifeTransformation *transformation)
 {
-    free(r->lum);
-    free(r->glow);
+    dgx_screen_destroy(&transformation->vscreen);
+    free(transformation->rlut);
+    free(transformation->glow_prev);
+    free(transformation->glow_next);
+    free(transformation->source_used);
+    memset(transformation, 0, sizeof(*transformation));
 }
 
-// Additively stamps a disc with quadratic falloff that reaches zero at the radius.
-static void stamp_glow(const LifeRenderer *r, GlowPoint g)
+bool is_source_used(LifeTransformation *transformation, int x, int y)
 {
-    if (g.intensity <= 0) return;
-    int r2 = r->radius * r->radius;
-    int x0 = max_int(g.pos.x - r->radius, 0);
-    int x1 = min_int(g.pos.x + r->radius, r->width - 1);
-    int y0 = max_int(g.pos.y - r->radius, 0);
-    int y1 = min_int(g.pos.y + r->radius, r->height - 1);
-    for (int py = y0; py <= y1; py++) {
-        int      dy  = py - g.pos.y;
-        uint8_t *row = r->lum + py * r->width;
-        for (int px = x0; px <= x1; px++) {
-            int dx = px - g.pos.x;
-            int d2 = dx * dx + dy * dy;
-            if (d2 >= r2) continue;
-            int v   = row[px] + g.intensity * (r2 - d2) / r2;
-            row[px] = v > 255 ? 255 : v;
+    size_t idx = CELL_OFFSET(x, y, transformation->current->width);
+    return (transformation->source_used[idx / 8u] & (1 << (idx % 8u))) != 0;
+}
+
+void mark_source_used(LifeTransformation *transformation, int x, int y)
+{
+    size_t idx = CELL_OFFSET(x, y, transformation->current->width);
+    transformation->source_used[idx / 8u] |= (1 << (idx % 8u));
+}
+
+Point inner_point(float t, Point start, Point end)
+{
+    return (Point){.x = start.x + (int)((end.x - start.x) * t), .y = start.y + (int)((end.y - start.y) * t)};
+}
+
+static int neibx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+static int neiby[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+
+static void collect_glow(LifeTransformation *transformation, uint8_t *glow, Point point, uint8_t intensity)
+{
+    int x0 = max_int(point.x - transformation->radius, 0);
+    int x1 = min_int(point.x + transformation->radius, transformation->grid_width - 1);
+    int y0 = max_int(point.y - transformation->radius, 0);
+    int y1 = min_int(point.y + transformation->radius, transformation->grid_height - 1);
+
+    for (int y = y0; y <= y1; y++) {
+        int dy = y - point.y;
+        for (int x = x0; x <= x1; x++) {
+            int dx           = x - point.x;
+            int distance     = dx * dx + dy * dy;
+            int falloff      = distance < transformation->rlut_limit ? transformation->rlut[distance] : 0;
+            int contribution = falloff * intensity / 255;
+            int idx          = CELL_OFFSET(x, y, transformation->grid_width);
+            int collected    = glow[idx] + contribution;
+            glow[idx]        = min_int(collected, 255);
         }
     }
 }
 
-static void append_glow(LifeRenderer *r, int *count, Point pos, int intensity)
+void collect_initial_glow(LifeTransformation *transformation)
 {
-    if (*count >= r->glow_capacity) {
-        return;
+    LifeGeneration *current = transformation->current;
+    for (int y = 0; y < current->height; y++) {
+        for (int x = 0; x < current->width; x++) {
+            if (current->cells[CELL_OFFSET(x, y, current->width)] == 0) continue;
+            collect_glow(                                                                 //
+                transformation,                                                           //
+                transformation->glow_next,                                                //
+                (Point){x * transformation->cell_width + transformation->cell_width / 2,  //
+                        y * transformation->cell_width + transformation->cell_width / 2}, //
+                255                                                                       //
+            );
+        }
     }
-    r->glow[*count] = (GlowPoint){pos, intensity};
-    (*count)++;
 }
 
-static int collect_glow(LifeRenderer *r, float t, const LifeGeneration *current, const LifeGeneration *next)
+void draw_life_transformation(float t, LifeTransformation *transformation)
 {
-    int       n = 0;
-    const int w = current->width;
-    const int h = current->height;
-    bool      matched_next[w * h];
-    memset(matched_next, false, sizeof(matched_next));
-
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            int idx = CELL_OFFSET(x, y, w);
-            if (!current->cells[idx]) {
+    LifeGeneration *current = transformation->current;
+    LifeGeneration *next    = transformation->next;
+    // Swap glow buffers to prepare for the next frame.
+    uint8_t *glow_accu        = transformation->glow_prev;
+    transformation->glow_prev = transformation->glow_next;
+    transformation->glow_next = glow_accu;
+    // glow_accu now points to the buffer that will accumulate the glow for the current frame.
+    glow_accu                = transformation->glow_next;
+    SegmentsInCell *segments = calloc(current->width * current->height, sizeof(SegmentsInCell));
+    if (segments == NULL) {
+        ESP_LOGE(TAG, "failed to allocate memory for segments");
+        return;
+    }
+    Point *faded_points = calloc(current->width * current->height, sizeof(Point));
+    if (faded_points == NULL) {
+        ESP_LOGE(TAG, "failed to allocate memory for faded points");
+        free(segments);
+        return;
+    }
+    Point *static_points = calloc(current->width * current->height, sizeof(Point));
+    if (static_points == NULL) {
+        ESP_LOGE(TAG, "failed to allocate memory for static points");
+        free(segments);
+        free(faded_points);
+        return;
+    }
+    int   faded_count  = 0;
+    int   static_count = 0;
+    float t_tail       = max_float(t * 1.5f - 0.5f, 0.0f);
+    memset(transformation->source_used, 0, (current->width * current->height + 7) / 8);
+    for (int y = 0; y < current->height; y++) {
+        for (int x = 0; x < current->width; x++) {
+            int idx       = CELL_OFFSET(x, y, current->width);
+            int cell_case = current->cells[idx] + next->cells[idx] * 2;
+            if (cell_case == 0) continue;
+            if (cell_case == 3) {
+                static_points[static_count] = (Point){x * transformation->cell_width + transformation->cell_width / 2,
+                                                      y * transformation->cell_width + transformation->cell_width / 2};
+                static_count++;
                 continue;
             }
-
-            Point source   = cell_center(x, y, r->cell_size);
-            int   best_idx = -1;
-            int   best_d2  = INT_MAX;
-
-            for (int yy = 0; yy < h; yy++) {
-                for (int xx = 0; xx < w; xx++) {
-                    int dest_idx = CELL_OFFSET(xx, yy, w);
-                    if (!next->cells[dest_idx] || matched_next[dest_idx]) {
-                        continue;
-                    }
-
-                    int dx = xx - x;
-                    int dy = yy - y;
-                    int d2 = dx * dx + dy * dy;
-                    if (d2 < best_d2) {
-                        best_d2  = d2;
-                        best_idx = dest_idx;
+            // int next_neib_count = 0;
+            // int curr_neib_count = 0;
+            for (int i = 0; i < 8; i++) {
+                int nx = x + neibx[i];
+                int ny = y + neiby[i];
+                if (nx >= 0 && nx < current->width && ny >= 0 && ny < current->height) {
+                    // curr_neib_count += current->cells[CELL_OFFSET(nx, ny, current->width)];
+                    // next_neib_count += next->cells[CELL_OFFSET(nx, ny, current->width)];
+                    if (cell_case == 2 && current->cells[CELL_OFFSET(nx, ny, current->width)]) {
+                        Point start = (Point){nx * transformation->cell_width + transformation->cell_width / 2,
+                                              ny * transformation->cell_width + transformation->cell_width / 2};
+                        Point end   = (Point){x * transformation->cell_width + transformation->cell_width / 2,
+                                              y * transformation->cell_width + transformation->cell_width / 2};
+                        mark_source_used(transformation, nx, ny);
+                        //
+                        segments[idx].segments[segments[idx].count].start = inner_point(t_tail, start, end);
+                        segments[idx].segments[segments[idx].count].end   = inner_point(t, start, end);
+                        segments[idx].count++;
                     }
                 }
             }
-
-            if (best_idx >= 0) {
-                int   dest_x           = best_idx % w;
-                int   dest_y           = best_idx / w;
-                Point dst              = cell_center(dest_x, dest_y, r->cell_size);
-                int   dx               = dst.x - source.x;
-                int   dy               = dst.y - source.y;
-                float dist             = sqrtf((float)dx * dx + (float)dy * dy);
-                Point pos              = gravity_motion(source, dst, t);
-                matched_next[best_idx] = true;
-                append_glow(r, &n, pos, gravity_intensity(dist, 9.0f));
-            } else {
-                append_glow(r, &n, source, (int)(255.0f * (1.0f - t)));
+        }
+    }
+    for (int y = 0; y < current->height; y++) {
+        for (int x = 0; x < current->width; x++) {
+            int idx       = CELL_OFFSET(x, y, current->width);
+            int cell_case = current->cells[idx] + next->cells[idx] * 2;
+            if (cell_case == 1 && !is_source_used(transformation, x, y)) {
+                faded_points[faded_count] = (Point){x * transformation->cell_width + transformation->cell_width / 2,
+                                                    y * transformation->cell_width + transformation->cell_width / 2};
+                faded_count++;
             }
         }
     }
-
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            int idx = CELL_OFFSET(x, y, w);
-            if (!next->cells[idx] || matched_next[idx]) {
-                continue;
+    memset(glow_accu, 0, transformation->grid_width * transformation->grid_height * sizeof(uint8_t));
+    for (int y = 0; y < current->height; y++) {
+        for (int x = 0; x < current->width; x++) {
+            int idx = CELL_OFFSET(x, y, current->width);
+            for (int i = 0; i < segments[idx].count; i++) {
+                collect_glow(transformation, glow_accu, segments[idx].segments[i].start, 255 / 6);
+                collect_glow(transformation, glow_accu, segments[idx].segments[i].end, 255 / 6);
             }
-
-            Point center = cell_center(x, y, r->cell_size);
-            append_glow(r, &n, center, (int)(255.0f * t));
         }
     }
-
-    return n;
-}
-
-static void draw_life_transformation(LifeRenderer *r, dgx_screen_t *vscreen, float t, const LifeGeneration *current, const LifeGeneration *next)
-{
-    int count = collect_glow(r, t, current, next);
-    memset(r->lum, 0, r->width * r->height);
-    for (int i = 0; i < count; i++) {
-        stamp_glow(r, r->glow[i]);
+    for (int i = 0; i < faded_count; i++) {
+        collect_glow(transformation, glow_accu, faded_points[i], (uint8_t)(255.0f * (1.0f - t)));
     }
-    for (int py = 0; py < r->height; py++) {
-        const uint8_t *row = r->lum + py * r->width;
-        for (int px = 0; px < r->width; px++) {
-            uint8_t v = row[px];
-            dgx_set_pixel(vscreen, px, py, dgx_rgb_to_16(v, v, v));
+    for (int i = 0; i < static_count; i++) {
+        collect_glow(transformation, glow_accu, static_points[i], 255);
+    }
+    float t_smooth = t * t * (3 - 2 * t);
+    for (int y = 0; y < transformation->grid_height; y++) {
+        for (int x = 0; x < transformation->grid_width; x++) {
+            int     glow_idx  = CELL_OFFSET(x, y, transformation->grid_width);
+            uint8_t intensity = glow_accu[glow_idx] * t_smooth + (1.0f - t_smooth) * transformation->glow_prev[glow_idx];
+            dgx_set_pixel(transformation->vscreen, x, y, dgx_rgb_to_16(intensity, intensity, intensity));
+            glow_accu[glow_idx] = intensity;
         }
     }
+    free(segments);
+    free(faded_points);
+    free(static_points);
 }
 
 static bool life_is_same(const LifeGeneration *a, const LifeGeneration *b)
@@ -337,62 +441,128 @@ static bool life_is_same(const LifeGeneration *a, const LifeGeneration *b)
     return memcmp(a->cells, b->cells, a->width * a->height) == 0;
 }
 
+LifeGeneration *init_life(LifeTransformation *transformation, life_creation_func_t create_func, dgx_screen_t *screen)
+{
+    LifeGeneration *step = create_func();
+    if (step == NULL) {
+        ESP_LOGE(TAG, "initial life allocation failed");
+        return NULL;
+    }
+    int init_max_cell_width = min_int(screen->width / step->width, screen->height / step->height);
+    while (!life_transformation_init(transformation, step, screen->width, screen->height, init_max_cell_width)) {
+        ESP_LOGE(TAG, "life transformation with max cell width %d initialization failed", init_max_cell_width);
+        init_max_cell_width--;
+        if (init_max_cell_width <= 3) {
+            ESP_LOGE(TAG, "unable to initialize life transformation with any cell width");
+            free(step);
+            return NULL;
+        }
+    }
+    transformation->life_creation_func = create_func;
+    ESP_LOGI(TAG, "life transformation initialized with max cell width %d", init_max_cell_width);
+    return step;
+}
+
+life_creation_func_t life_types[] = {create_initial_gliders_life, create_initial_navy_life, NULL};
+
+typedef enum
+{
+    ButtonReleased,
+    ButtonPressed,
+} ButtonState;
+
 void app_main(void)
 {
     dgx_screen_t *screen = cyd_init_display();
     if (screen == NULL) {
         return;
     }
+    gpio_config_t boot_btn_config = {
+        .pin_bit_mask = 1ULL << GPIO_NUM_0,
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
 
-    LifeGeneration *step = create_initial_navy_life();
+    gpio_config(&boot_btn_config);
+
+    LifeTransformation transformation;
+    LifeGeneration    *step = init_life(&transformation, life_types[0], screen);
     if (step == NULL) {
-        ESP_LOGE(TAG, "initial life allocation failed");
         return;
     }
 
-    LifeRenderer renderer;
-    if (!life_renderer_init(&renderer, screen->width, screen->height, step->width, step->height)) {
-        ESP_LOGE(TAG, "renderer allocation failed");
-        free(step);
-        return;
-    }
-    const int offset_x = (screen->width - renderer.width) / 2;
-    const int offset_y = (screen->height - renderer.height) / 2;
-
-    dgx_screen_t *vscreen = dgx_vscreen_init(renderer.width, renderer.height, 16, DgxScreenRGB);
-    if (vscreen == NULL) {
-        ESP_LOGE(TAG, "virtual screen init failed");
-        life_renderer_free(&renderer);
-        free(step);
-        return;
-    }
-
-    ESP_LOGI(TAG, "CYD display initialized: %dx%d, cell %dpx", screen->width, screen->height, renderer.cell_size);
-
+    ESP_LOGI(TAG, "CYD display initialized: %dx%d, cell %dpx", screen->width, screen->height, transformation.cell_width);
+    collect_initial_glow(&transformation);
+    ButtonState button_state = gpio_get_level(GPIO_NUM_0) == 0 ? ButtonPressed : ButtonReleased;
+    int64_t     fps_start    = esp_timer_get_time();
+    uint32_t    frame_count  = 0;
     while (true) {
         LifeGeneration *next = next_generation(step);
         if (next != NULL && (!is_life_still_alive(next) || life_is_same(step, next))) {
             free(next); // extinct or still life: morph back to the seed
-            next = create_initial_navy_life();
+            next = transformation.life_creation_func();
         }
         if (next == NULL) {
             ESP_LOGE(TAG, "next generation allocation failed");
             break;
         }
-
-        int64_t start_time = esp_timer_get_time();
+        transformation.next        = next;
+        transformation.current     = step;
+        int64_t start_time         = esp_timer_get_time();
+        bool    restart_generation = false;
         while (true) {
             float t = (float)(esp_timer_get_time() - start_time) / 1000000.0f;
             if (t > 1.0f) t = 1.0f;
-            draw_life_transformation(&renderer, vscreen, t, step, next);
-            dgx_vscreen_to_screen(screen, offset_x, offset_y, vscreen);
+            dgx_fill_rectangle(transformation.vscreen, 0, 0, transformation.grid_width, transformation.grid_height, 0x000000);
+            draw_life_transformation(t, &transformation);
+            int offset_x = (screen->width - transformation.grid_width) / 2;
+            int offset_y = (screen->height - transformation.grid_height) / 2;
+            dgx_vscreen_to_screen(screen, offset_x, offset_y, transformation.vscreen);
+            frame_count++;
+            int64_t fps_elapsed = esp_timer_get_time() - fps_start;
+            if (fps_elapsed >= 1000000) {
+                ESP_LOGI(TAG, "FPS: %.1f", frame_count * 1000000.0f / fps_elapsed);
+                fps_start   = esp_timer_get_time();
+                frame_count = 0;
+            }
             if (t >= 1.0f) break;
+            bool pressed = gpio_get_level(GPIO_NUM_0) == 0;
+            if (!pressed) {
+                button_state = ButtonReleased;
+            } else if (button_state == ButtonReleased) {
+                dgx_fill_rectangle(screen, offset_x, offset_y, transformation.vscreen->width, transformation.vscreen->height, 0x000000);
+                button_state                     = ButtonPressed;
+                life_creation_func_t create_func = life_types[0];
+                for (int i = 0; life_types[i] != NULL; i++) {
+                    if (life_types[i] == transformation.life_creation_func) {
+                        create_func = life_types[i + 1] == NULL ? life_types[0] : life_types[i + 1];
+                        break;
+                    }
+                }
+                free(next);
+                free(step);
+                next = NULL;
+                step = NULL;
+                life_transformation_free(&transformation);
+                step = init_life(&transformation, create_func, screen);
+                if (step != NULL) {
+                    collect_initial_glow(&transformation);
+                }
+                restart_generation = true;
+                break;
+            }
             vTaskDelay(1);
+        }
+        if (restart_generation) {
+            if (step == NULL) break;
+            continue;
         }
         free(step);
         step = next;
     }
 
     free(step);
-    life_renderer_free(&renderer);
+    life_transformation_free(&transformation);
 }
