@@ -1,44 +1,82 @@
 # CYD Life Morphing
 
-An ESP-IDF application for the Cheap Yellow Display (CYD), an ESP32 board with an ILI9341 display. It uses the [DGX graphics component](https://components.espressif.com/components/jef-sure/dgx) to animate Conway's Game of Life transitions.
+CYD Life Morphing is a real-time Conway's Game of Life visualizer for the ESP32-based Cheap Yellow Display (CYD). Instead of replacing one generation with the next as a blocky grid, it interprets births and deaths as movement and renders each transition as a field of soft, traveling light.
 
-## What It Does
+The application is written in C with ESP-IDF and uses the [DGX graphics component](https://components.espressif.com/components/jef-sure/dgx) to drive the ILI9341 display.
 
-The application:
+## Highlights
 
-- Initializes the CYD's ILI9341 display over SPI and creates a 16-bit virtual screen.
-- Creates a 9x9 starting Life pattern: a four-cell T shape centered in the grid.
-- Calculates each following generation using the standard Conway's Game of Life rules with fixed, non-wrapping grid edges.
-- Interpolates active cells into movement segments, then renders a one-second transition between generations.
-- Transfers the virtual screen to the physical display for each animation frame.
+- **Animated Life transitions** - each generation morphs into the next over one second instead of changing instantly.
+- **Directional movement** - newly born cells collect short segments from neighboring live cells, creating visible trails between generations.
+- **Additive radial glow** - moving, static, and fading cells contribute to a per-pixel luminance field with saturated additive blending.
+- **Temporal smoothing** - double-buffered glow maps and smoothstep interpolation reduce flicker and abrupt intensity changes.
+- **Two built-in seeds** - four inward-moving gliders on a 20x15 field and a compact 9x9 T-shaped pattern.
+- **Pattern switching** - one press of the CYD BOOT button selects the next seed; holding the button does not repeatedly switch patterns.
+- **Memory-aware rendering** - initialization reduces cell size until the virtual screen and renderer buffers fit in available RAM.
+- **Live performance reporting** - completed render-and-transfer frames are reported to the serial log once per second.
+
+## How It Works
+
+The simulation uses the standard Conway's Game of Life rules on a finite, non-wrapping grid:
+
+- A live cell survives with two or three live neighbors.
+- A dead cell becomes alive when it has exactly three live neighbors.
+- Every other cell dies or remains dead.
+
+For rendering, each cell is classified by its state in the current and next generations:
+
+| Current | Next | Rendering behavior |
+| --- | --- | --- |
+| Dead | Dead | No contribution |
+| Alive | Dead | Fades unless used as a source for a birth |
+| Dead | Alive | Receives animated segments from live neighbors |
+| Alive | Alive | Remains as a static glow source |
+
+Segment endpoints advance at different rates to produce a short moving tail. The renderer accumulates radial contributions into an 8-bit glow map, blends it with the previous frame, converts the result to RGB565, and transfers the virtual screen to the display over SPI.
+
+If a pattern becomes extinct or reaches a still life, the application starts that seed again.
+
+## Controls
+
+Press the CYD **BOOT** button on `GPIO 0` to cycle through the built-in patterns. The button uses a press/release state machine, so it must be released before another press is accepted.
+
+The serial monitor reports initialization, allocation fallback, errors, and measured FPS:
+
+```text
+I (...) cyd-life-morphing: life transformation initialized with max cell width 16
+I (...) cyd-life-morphing: FPS: 14.7
+```
 
 ## Hardware
 
-The target is an ESP32-based Cheap Yellow Display with an ILI9341 panel.
+The current pin configuration targets a classic ESP32 Cheap Yellow Display with a 320x240 ILI9341 panel.
 
-| Signal | GPIO |
+| Function | GPIO |
 | --- | ---: |
-| SPI MOSI | 13 |
-| SPI MISO | 12 |
-| SPI clock | 14 |
+| TFT MOSI | 13 |
+| TFT MISO | 12 |
+| TFT clock | 14 |
 | TFT chip select | 15 |
 | TFT data/command | 2 |
 | TFT backlight | 21 |
+| BOOT button | 0 |
 | TFT reset | Not connected |
 
-The display runs on `SPI2_HOST` at 40 MHz. Its orientation is configured as right-to-left and top-to-bottom.
+The display uses `SPI2_HOST`, RGB565 color, and a 40 MHz SPI clock. Display orientation is configured in `cyd_init_display()`.
 
-## Prerequisites
+CYD boards exist in several revisions. Check your board's schematic before changing the display driver or pin assignments.
 
-- ESP-IDF 4.1 or newer. The development container uses an ESP-IDF image.
-- An ESP32 CYD connected over USB.
-- Python dependencies installed by the ESP-IDF environment.
+## Requirements
 
-The project declares `jef-sure/dgx` in [main/idf_component.yml](main/idf_component.yml). ESP-IDF Component Manager downloads it during configuration/build.
+- ESP32-based CYD with an ILI9341 display
+- USB data cable and access to the board's serial port
+- ESP-IDF environment with `idf.py` available
 
-## Build And Flash
+The component manifest requires ESP-IDF 4.1 or newer. The [DGX component](https://components.espressif.com/components/jef-sure/dgx) is declared in [main/idf_component.yml](main/idf_component.yml) and is resolved by the ESP-IDF Component Manager.
 
-Run these commands from the project root in an ESP-IDF shell or the development container:
+## Build, Flash, and Monitor
+
+From an ESP-IDF shell in the project root:
 
 ```sh
 idf.py set-target esp32
@@ -46,22 +84,73 @@ idf.py build
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
-Replace `/dev/ttyUSB0` with the serial device used by your board. Exit the monitor with `Ctrl+]`.
+Replace `/dev/ttyUSB0` with the serial device for your board. On Linux, it is commonly `/dev/ttyUSB0` or `/dev/ttyACM0`. Exit the ESP-IDF monitor with `Ctrl+]`.
 
-For a fresh configuration, [sdkconfig.defaults](sdkconfig.defaults) enables DGX SPI support, the ILI9341 driver, and the DGX virtual-screen feature.
+For subsequent builds, `idf.py build` is sufficient. To erase stored flash contents before reflashing:
 
-## Current Build Status
+```sh
+idf.py -p /dev/ttyUSB0 erase-flash
+idf.py -p /dev/ttyUSB0 flash monitor
+```
 
-`idf.py build` completes successfully as of September 8, 2026 and produces `build/cyd-life-morphing.bin`.
+The default configuration in [sdkconfig.defaults](sdkconfig.defaults) selects the ESP32 target and enables DGX SPI, ILI9341, and virtual-screen support.
 
-The renderer is still a work in progress: it computes per-pixel colors without drawing them and currently emits warnings for that unused color and unused grid offsets. These are application implementation tasks, not ESP-IDF or DGX setup failures.
+## Project Structure
 
-## Formatting
+```text
+.
+|-- CMakeLists.txt             ESP-IDF project definition
+|-- main/
+|   |-- CMakeLists.txt         Main component definition
+|   |-- idf_component.yml      DGX dependency declaration
+|   `-- main.c                 Simulation, renderer, controls, and display setup
+|-- sdkconfig.defaults         Reproducible DGX and target defaults
+`-- LICENSE                    MIT license
+```
 
-The development container installs `clang-format`. Project rules are in [.clang-format](.clang-format), and C/C++ files are configured to use the `xaver.clang-format` VS Code extension.
+The main renderer state is owned by `LifeTransformation`. It contains the active generations, grid geometry, radial lookup table, DGX virtual screen, double glow buffers, source-cell bitset, and the selected seed factory. Keeping these resources together makes pattern replacement and allocation cleanup explicit.
 
-Format the current file with `Shift+Alt+F`, or format from the terminal:
+## Adding Patterns
+
+Create a function that allocates a `LifeGeneration`, sets its live cells, and returns it. Then add the function to the null-terminated `life_types` array in [main/main.c](main/main.c):
+
+```c
+LifeGeneration *create_my_pattern(void)
+{
+	LifeGeneration *life = create_life(20, 15);
+	if (life == NULL) {
+		return NULL;
+	}
+
+	life->cells[CELL_OFFSET(10, 7, life->width)] = 1;
+	return life;
+}
+
+life_creation_func_t life_types[] = {
+	create_initial_gliders_life,
+	create_initial_navy_life,
+	create_my_pattern,
+	NULL,
+};
+```
+
+Keep pattern dimensions modest: the RGB565 virtual screen requires two bytes per pixel, and each glow buffer requires one byte per pixel. The application automatically retries with smaller cells if the initial allocation does not fit.
+
+## Development
+
+Format the source with the repository's ClangFormat configuration:
 
 ```sh
 clang-format -i main/main.c
+clang-format --dry-run --Werror main/main.c
 ```
+
+Build warnings are treated seriously by the ESP-IDF toolchain. Run a full build before flashing changes:
+
+```sh
+idf.py build
+```
+
+## License
+
+This project is available under the [MIT License](LICENSE).
