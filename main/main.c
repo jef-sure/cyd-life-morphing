@@ -579,9 +579,10 @@ LifeGeneration *init_life(LifeTransformation *transformation, life_creation_func
         return NULL;
     }
     int init_max_cell_width = min_int(screen->width / step->width, screen->height / step->height);
+    if (init_max_cell_width % 2 == 0) init_max_cell_width--;
     while (!life_transformation_init(transformation, step, screen->width, screen->height, init_max_cell_width)) {
         ESP_LOGE(TAG, "life transformation with max cell width %d initialization failed", init_max_cell_width);
-        init_max_cell_width--;
+        init_max_cell_width -= 2;
         if (init_max_cell_width <= 3) {
             ESP_LOGE(TAG, "unable to initialize life transformation with any cell width");
             free(step);
