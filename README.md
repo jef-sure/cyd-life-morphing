@@ -43,8 +43,10 @@ Press the CYD **BOOT** button on `GPIO 0` to cycle through the built-in patterns
 The serial monitor reports initialization, allocation fallback, errors, and measured FPS:
 
 ```text
-I (...) cyd-life-morphing: life transformation initialized with max cell width 16
-I (...) cyd-life-morphing: FPS: 14.7
+I (615) cyd-life-morphing: life transformation initialized with max cell width 21
+I (616) cyd-life-morphing: CYD display initialized: 320x240, cell 21px
+I (1645) cyd-life-morphing: FPS: 25.4
+I (2672) cyd-life-morphing: FPS: 25.3
 ```
 
 ## Hardware
