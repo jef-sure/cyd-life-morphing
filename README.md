@@ -10,10 +10,11 @@ The application is written in C with ESP-IDF and uses the [DGX graphics componen
 - **Directional movement** - newly born cells collect short segments from neighboring live cells, creating visible trails between generations.
 - **Additive radial glow** - moving, static, and fading cells contribute to a per-pixel luminance field with saturated additive blending.
 - **Temporal smoothing** - double-buffered glow maps and smoothstep interpolation reduce flicker and abrupt intensity changes.
-- **Two built-in seeds** - four inward-moving gliders on a 20x15 field and a compact 9x9 T-shaped pattern.
+- **Six built-in patterns** - oscillators, gliders collision, and methuselahs (Gliders, Navy T-tetromino, Beacon, Toad, Pulsar, and R-pentomino).
 - **Pattern switching** - one press of the CYD BOOT button selects the next seed; holding the button does not repeatedly switch patterns.
 - **Memory-aware rendering** - initialization reduces cell size until the virtual screen and renderer buffers fit in available RAM.
-- **Live performance reporting** - completed render-and-transfer frames are reported to the serial log once per second.
+- **Live performance reporting** - completed render-and-transfer frames and step counts are reported to the serial log once per second.
+- **Optimized rendering pipeline** - direct virtual-screen buffer writes, circular-span bounding, and integer fixed-point math sustain ~25 FPS on the ESP32.
 
 ## How It Works
 
@@ -36,17 +37,33 @@ Segment endpoints advance at different rates to produce a short moving tail. The
 
 If a pattern becomes extinct or reaches a still life, the application starts that seed again.
 
+## Built-in Patterns
+
+Press the BOOT button to cycle through the 6 included patterns:
+
+| Pattern | Grid | Type | Description |
+| --- | :---: | :---: | --- |
+| **Gliders** | 10x11 | Collision | 4 gliders flying inward from the corners, colliding in the center into 4 still blocks. |
+| **Navy (T-Tetromino)** | 9x9 | Methuselah | Compact 4-cell T-shape that rapidly expands, oscillates, and stabilizes. |
+| **Beacon** | 6x6 | Period-2 Oscillator | Two diagonally adjacent 2x2 blocks with touching corners alternately blinking on and off. |
+| **Toad** | 6x4 | Period-2 Oscillator | Two offset 3-cell rows pulsating between horizontal and vertical forms. |
+| **Pulsar** | 15x15 | Period-3 Oscillator | Large, highly symmetrical (8-fold D4 symmetry) pulsating flower pattern. |
+| **R-pentomino** | 30x25 | Methuselah | Classic 5-cell seed evolving through a long, complex cascade of births and moving debris. |
+
 ## Controls
 
 Press the CYD **BOOT** button on `GPIO 0` to cycle through the built-in patterns. The button uses a press/release state machine, so it must be released before another press is accepted.
 
-The serial monitor reports initialization, allocation fallback, errors, and measured FPS:
+The serial monitor reports initialization, allocation fallback, generation steps, pattern restarts, and measured FPS:
 
 ```text
 I (615) cyd-life-morphing: life transformation initialized with max cell width 21
 I (616) cyd-life-morphing: CYD display initialized: 320x240, cell 21px
-I (1645) cyd-life-morphing: FPS: 25.4
-I (2672) cyd-life-morphing: FPS: 25.3
+I (617) cyd-life-morphing: Step #1
+I (1645) cyd-life-morphing: FPS: 25.1
+I (1646) cyd-life-morphing: Step #2
+...
+I (13670) cyd-life-morphing: Restarting pattern (still life) after 13 steps
 ```
 
 ## Hardware

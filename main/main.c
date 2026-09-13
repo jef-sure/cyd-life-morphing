@@ -1,3 +1,4 @@
+#include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -131,6 +132,104 @@ LifeGeneration *create_initial_navy_life()
     return life;
 }
 
+LifeGeneration *create_initial_beacon_life()
+{
+    int             width = 6;
+    LifeGeneration *life  = create_life(width, width);
+    if (life == NULL) {
+        return NULL;
+    }
+
+    // Upper-left 2x2 block (minus its inner corner)
+    life->cells[CELL_OFFSET(1, 1, width)] = 1;
+    life->cells[CELL_OFFSET(2, 1, width)] = 1;
+    life->cells[CELL_OFFSET(1, 2, width)] = 1;
+
+    // Lower-right 2x2 block (minus its inner corner)
+    life->cells[CELL_OFFSET(4, 3, width)] = 1;
+    life->cells[CELL_OFFSET(3, 4, width)] = 1;
+    life->cells[CELL_OFFSET(4, 4, width)] = 1;
+
+    return life;
+}
+
+LifeGeneration *create_initial_toad_life()
+{
+    int             width = 6;
+    LifeGeneration *life  = create_life(width, 4);
+    if (life == NULL) {
+        return NULL;
+    }
+
+    // Top row of the toad
+    life->cells[CELL_OFFSET(2, 1, width)] = 1;
+    life->cells[CELL_OFFSET(3, 1, width)] = 1;
+    life->cells[CELL_OFFSET(4, 1, width)] = 1;
+
+    // Bottom row of the toad, shifted one cell left
+    life->cells[CELL_OFFSET(1, 2, width)] = 1;
+    life->cells[CELL_OFFSET(2, 2, width)] = 1;
+    life->cells[CELL_OFFSET(3, 2, width)] = 1;
+
+    return life;
+}
+
+LifeGeneration *create_initial_pulsar_life()
+{
+    int             width = 15;
+    LifeGeneration *life  = create_life(width, width);
+    if (life == NULL) {
+        return NULL;
+    }
+
+    int cx = width / 2; // center of the field (7)
+    int cy = width / 2;
+
+    // The pulsar has 8-fold (D4) symmetry: 4 rotations x diagonal mirror.
+    // Just two 3-cell "arm" segments are enough to generate the whole shape.
+    static const int arm_offsets[2][3][2] = {
+        {{-4, -6}, {-3, -6}, {-2, -6}}, // horizontal arm segment
+        {{-1, -4}, {-1, -3}, {-1, -2}}, // vertical arm segment
+    };
+
+    for (int seg = 0; seg < 2; seg++) {
+        for (int i = 0; i < 3; i++) {
+            int x = arm_offsets[seg][i][0];
+            int y = arm_offsets[seg][i][1];
+            for (int rot = 0; rot < 4; rot++) {
+                life->cells[CELL_OFFSET(cx + x, cy + y, width)] = 1; // rotated cell
+                life->cells[CELL_OFFSET(cx + y, cy + x, width)] = 1; // its diagonal mirror
+                //
+                int tmp = x;
+                x       = -y;
+                y       = tmp; // rotate 90 degrees for the next iteration
+            }
+        }
+    }
+
+    return life;
+}
+
+LifeGeneration *create_initial_rpentomino_life()
+{
+    int             width = 30;
+    LifeGeneration *life  = create_life(width, 25);
+    if (life == NULL) {
+        return NULL;
+    }
+
+    int cx = width / 2 - 2;
+    int cy = 25 / 2 - 2;
+
+    life->cells[CELL_OFFSET(cx + 0, cy - 1, width)] = 1; // top-right cell of the R shape
+    life->cells[CELL_OFFSET(cx + 1, cy - 1, width)] = 1; // top-right cell, extended right
+    life->cells[CELL_OFFSET(cx - 1, cy + 0, width)] = 1; // middle-left cell
+    life->cells[CELL_OFFSET(cx + 0, cy + 0, width)] = 1; // middle-center cell
+    life->cells[CELL_OFFSET(cx + 0, cy + 1, width)] = 1; // bottom-center cell
+
+    return life;
+}
+
 LifeGeneration *create_initial_gliders_life()
 {
     const int        width           = 10;
@@ -188,7 +287,7 @@ static inline float max_float(float a, float b)
 
 typedef struct
 {
-    int x, y;
+    int16_t x, y;
 } Point;
 
 typedef struct
@@ -467,9 +566,9 @@ void draw_life_transformation(float t, LifeTransformation *transformation)
             glow_accu[glow_idx] = intensity;
         }
     }
-    free(segments);
-    free(faded_points);
     free(static_points);
+    free(faded_points);
+    free(segments);
 }
 
 static bool life_is_same(const LifeGeneration *a, const LifeGeneration *b)
@@ -499,7 +598,15 @@ LifeGeneration *init_life(LifeTransformation *transformation, life_creation_func
     return step;
 }
 
-life_creation_func_t life_types[] = {create_initial_gliders_life, create_initial_navy_life, NULL};
+life_creation_func_t life_types[] = {
+    create_initial_gliders_life,    //
+    create_initial_navy_life,       //
+    create_initial_beacon_life,     //
+    create_initial_toad_life,       //
+    create_initial_pulsar_life,     //
+    create_initial_rpentomino_life, //
+    NULL                            //
+};
 
 typedef enum
 {
@@ -534,11 +641,17 @@ void app_main(void)
     ButtonState button_state = gpio_get_level(GPIO_NUM_0) == 0 ? ButtonPressed : ButtonReleased;
     int64_t     fps_start    = esp_timer_get_time();
     uint32_t    frame_count  = 0;
+    uint32_t    step_count   = 0;
     while (true) {
+        step_count++;
+        ESP_LOGI(TAG, "Step #%" PRIu32, step_count);
         LifeGeneration *next = next_generation(step);
         if (next != NULL && (!is_life_still_alive(next) || life_is_same(step, next))) {
+            const char *reason = !is_life_still_alive(next) ? "extinct" : "still life";
+            ESP_LOGI(TAG, "Restarting pattern (%s) after %" PRIu32 " steps", reason, step_count);
             free(next); // extinct or still life: morph back to the seed
-            next = transformation.life_creation_func();
+            next       = transformation.life_creation_func();
+            step_count = 0;
         }
         if (next == NULL) {
             ESP_LOGE(TAG, "next generation allocation failed");
@@ -568,6 +681,7 @@ void app_main(void)
             if (!pressed) {
                 button_state = ButtonReleased;
             } else if (button_state == ButtonReleased) {
+                ESP_LOGI(TAG, "Restarting: pattern switch requested via button (after %" PRIu32 " steps)", step_count);
                 dgx_fill_rectangle(screen, offset_x, offset_y, transformation.vscreen->width, transformation.vscreen->height, 0x000000);
                 button_state                     = ButtonPressed;
                 life_creation_func_t create_func = life_types[0];
@@ -582,7 +696,8 @@ void app_main(void)
                 next = NULL;
                 step = NULL;
                 life_transformation_free(&transformation);
-                step = init_life(&transformation, create_func, screen);
+                step       = init_life(&transformation, create_func, screen);
+                step_count = 0;
                 if (step != NULL) {
                     collect_initial_glow(&transformation);
                 }
