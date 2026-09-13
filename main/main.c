@@ -29,7 +29,9 @@ enum
     CYD_TFT_SPI_HZ    = 40 * 1000 * 1000
 };
 
-static const char *TAG = "cyd-life-morphing";
+static const char *TAG      = "cyd-life-morphing";
+static int         neibx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+static int         neiby[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
 
 typedef struct
 {
@@ -60,8 +62,6 @@ LifeGeneration *next_generation(const LifeGeneration *current)
         return NULL;
     }
 
-    static int neibx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
-    static int neiby[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
     for (int y = 0; y < current->height; y++) {
         for (int x = 0; x < current->width; x++) {
             int alive_neighbors = 0;
@@ -136,26 +136,26 @@ LifeGeneration *create_initial_gliders_life()
     const int        width           = 20;
     const int        height          = 15;
     static const int live_cells[][2] = {
-        {3,  2 },
-        {4,  3 },
-        {2,  4 },
-        {3,  4 },
-        {4,  4 },
-        {16, 2 },
-        {15, 3 },
-        {15, 4 },
-        {16, 4 },
-        {17, 4 },
-        {3,  10},
-        {4,  10},
-        {4,  11},
-        {2,  12},
-        {4,  12},
-        {15, 10},
-        {16, 10},
-        {17, 10},
-        {15, 11},
-        {16, 12},
+        {3+3,  2 },
+        {4+3,  3 },
+        {2+3,  4 },
+        {3+3,  4 },
+        {4+3,  4 },
+        {16-3, 2 },
+        {15-3, 3 },
+        {15-3, 4 },
+        {16-3, 4 },
+        {17-3, 4 },
+        {3+3,  12 },
+        {4+3,  11 },
+        {2+3,  10 },
+        {3+3,  10 },
+        {4+3,  10 },
+        {15-3, 10},
+        {16-3, 10},
+        {17-3, 10},
+        {15-3, 11},
+        {16-3, 12},
     };
 
     LifeGeneration *life = create_life(width, height);
@@ -287,9 +287,6 @@ Point inner_point(float t, Point start, Point end)
 {
     return (Point){.x = start.x + (int)((end.x - start.x) * t), .y = start.y + (int)((end.y - start.y) * t)};
 }
-
-static int neibx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
-static int neiby[] = {-1, -1, -1, 0, 0, 1, 1, 1};
 
 static void collect_glow(LifeTransformation *transformation, uint8_t *glow, Point point, uint8_t intensity)
 {
