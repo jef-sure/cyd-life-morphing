@@ -319,6 +319,9 @@ typedef struct
     uint8_t             *glow_next;
     uint8_t             *glow_prev;
     uint8_t             *source_used;
+    SegmentsInCell      *segments;
+    Point               *faded_points;
+    Point               *static_points;
     life_creation_func_t life_creation_func;
 } LifeTransformation;
 
@@ -337,26 +340,32 @@ static bool life_transformation_init(LifeTransformation *transformation, LifeGen
     transformation->grid_height = transformation->cell_width * current->height;
     transformation->radius      = transformation->cell_width / 2 + transformation->cell_width / 4;
     transformation->rlut_limit  = transformation->radius * transformation->radius;
-
-    transformation->vscreen = dgx_vscreen_init(transformation->grid_width, transformation->grid_height, 16, DgxScreenRGB);
+    transformation->vscreen     = dgx_vscreen_init(transformation->grid_width, transformation->grid_height, 16, DgxScreenRGB);
     if (transformation->vscreen == NULL) {
         memset(transformation, 0, sizeof(*transformation));
         return false;
     }
 
-    transformation->glow_prev    = calloc(transformation->grid_width * transformation->grid_height, sizeof(uint8_t));
-    transformation->glow_next    = calloc(transformation->grid_width * transformation->grid_height, sizeof(uint8_t));
-    transformation->source_used  = calloc((current->width * current->height + 7) / 8, sizeof(uint8_t));
-    transformation->rlut         = malloc(transformation->rlut_limit * sizeof(int));
-    transformation->xcell_offset = malloc((transformation->radius + 1) * sizeof(int));
+    transformation->glow_prev     = calloc(transformation->grid_width * transformation->grid_height, sizeof(uint8_t));
+    transformation->glow_next     = calloc(transformation->grid_width * transformation->grid_height, sizeof(uint8_t));
+    transformation->source_used   = calloc((current->width * current->height + 7) / 8, sizeof(uint8_t));
+    transformation->rlut          = malloc(transformation->rlut_limit * sizeof(int));
+    transformation->xcell_offset  = malloc((transformation->radius + 1) * sizeof(int));
+    transformation->segments      = calloc(current->width * current->height, sizeof(SegmentsInCell));
+    transformation->faded_points  = calloc(current->width * current->height, sizeof(Point));
+    transformation->static_points = calloc(current->width * current->height, sizeof(Point));
     if (transformation->rlut == NULL || transformation->glow_prev == NULL || transformation->glow_next == NULL ||
-        transformation->source_used == NULL || transformation->xcell_offset == NULL) {
+        transformation->source_used == NULL || transformation->xcell_offset == NULL || transformation->segments == NULL ||
+        transformation->faded_points == NULL || transformation->static_points == NULL) {
         dgx_screen_destroy(&transformation->vscreen);
         free(transformation->rlut);
         free(transformation->glow_prev);
         free(transformation->glow_next);
         free(transformation->source_used);
+        free(transformation->faded_points);
+        free(transformation->static_points);
         free(transformation->xcell_offset);
+        free(transformation->segments);
         memset(transformation, 0, sizeof(*transformation));
         return false;
     }
@@ -380,6 +389,9 @@ static void life_transformation_free(LifeTransformation *transformation)
     free(transformation->glow_next);
     free(transformation->source_used);
     free(transformation->xcell_offset);
+    free(transformation->segments);
+    free(transformation->faded_points);
+    free(transformation->static_points);
     memset(transformation, 0, sizeof(*transformation));
 }
 
@@ -467,28 +479,14 @@ void draw_life_transformation(float t, LifeTransformation *transformation)
     transformation->glow_prev = transformation->glow_next;
     transformation->glow_next = glow_accu;
     // glow_accu now points to the buffer that will accumulate the glow for the current frame.
-    glow_accu                = transformation->glow_next;
-    SegmentsInCell *segments = calloc(current->width * current->height, sizeof(SegmentsInCell));
-    if (segments == NULL) {
-        ESP_LOGE(TAG, "failed to allocate memory for segments");
-        return;
-    }
-    Point *faded_points = calloc(current->width * current->height, sizeof(Point));
-    if (faded_points == NULL) {
-        ESP_LOGE(TAG, "failed to allocate memory for faded points");
-        free(segments);
-        return;
-    }
-    Point *static_points = calloc(current->width * current->height, sizeof(Point));
-    if (static_points == NULL) {
-        ESP_LOGE(TAG, "failed to allocate memory for static points");
-        free(segments);
-        free(faded_points);
-        return;
-    }
-    int   faded_count  = 0;
-    int   static_count = 0;
-    float t_tail       = max_float(t * 1.5f - 0.5f, 0.0f);
+    SegmentsInCell *segments = transformation->segments;
+    memset(segments, 0, current->width * current->height * sizeof(SegmentsInCell));
+    glow_accu            = transformation->glow_next;
+    Point *faded_points  = transformation->faded_points;
+    Point *static_points = transformation->static_points;
+    int    faded_count   = 0;
+    int    static_count  = 0;
+    float  t_tail        = max_float(t * 1.5f - 0.5f, 0.0f);
     memset(transformation->source_used, 0, (current->width * current->height + 7) / 8);
     for (int y = 0; y < current->height; y++) {
         for (int x = 0; x < current->width; x++) {
@@ -566,9 +564,6 @@ void draw_life_transformation(float t, LifeTransformation *transformation)
             glow_accu[glow_idx] = intensity;
         }
     }
-    free(static_points);
-    free(faded_points);
-    free(segments);
 }
 
 static bool life_is_same(const LifeGeneration *a, const LifeGeneration *b)
