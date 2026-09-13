@@ -82,3 +82,5 @@ Desktop.ini
 .gitignore
 .devcontainer/devcontainer.json
 .devcontainer/Dockerfile
+article*.md
+image.png

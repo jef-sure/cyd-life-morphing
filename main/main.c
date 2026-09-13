@@ -299,7 +299,7 @@ typedef struct
 typedef struct
 {
     int     count;
-    Segment segments[8];
+    Segment segments[3];
 } SegmentsInCell;
 
 typedef LifeGeneration *(*life_creation_func_t)();
