@@ -133,29 +133,29 @@ LifeGeneration *create_initial_navy_life()
 
 LifeGeneration *create_initial_gliders_life()
 {
-    const int        width           = 20;
-    const int        height          = 15;
+    const int        width           = 10;
+    const int        height          = 11;
     static const int live_cells[][2] = {
-        {3+3,  2 },
-        {4+3,  3 },
-        {2+3,  4 },
-        {3+3,  4 },
-        {4+3,  4 },
-        {16-3, 2 },
-        {15-3, 3 },
-        {15-3, 4 },
-        {16-3, 4 },
-        {17-3, 4 },
-        {3+3,  12 },
-        {4+3,  11 },
-        {2+3,  10 },
-        {3+3,  10 },
-        {4+3,  10 },
-        {15-3, 10},
-        {16-3, 10},
-        {17-3, 10},
-        {15-3, 11},
-        {16-3, 12},
+        {1, 0 },
+        {2, 1 },
+        {0, 2 },
+        {1, 2 },
+        {2, 2 },
+        {8, 0 },
+        {7, 1 },
+        {7, 2 },
+        {8, 2 },
+        {9, 2 },
+        {1, 10},
+        {2, 9 },
+        {0, 8 },
+        {1, 8 },
+        {2, 8 },
+        {7, 8 },
+        {8, 8 },
+        {9, 8 },
+        {7, 9 },
+        {8, 10},
     };
 
     LifeGeneration *life = create_life(width, height);
@@ -215,12 +215,18 @@ typedef struct
     int                  radius;
     int                  rlut_limit;
     int                 *rlut;
+    int                 *xcell_offset;
     dgx_screen_t        *vscreen;
     uint8_t             *glow_next;
     uint8_t             *glow_prev;
     uint8_t             *source_used;
     life_creation_func_t life_creation_func;
 } LifeTransformation;
+
+static inline float smoothstep3(float t)
+{
+    return t * t * (3 - 2 * t);
+}
 
 static bool life_transformation_init(LifeTransformation *transformation, LifeGeneration *current, int screen_width, int screen_height,
                                      int max_cell_width)
@@ -239,24 +245,30 @@ static bool life_transformation_init(LifeTransformation *transformation, LifeGen
         return false;
     }
 
-    transformation->glow_prev   = calloc(transformation->grid_width * transformation->grid_height, sizeof(uint8_t));
-    transformation->glow_next   = calloc(transformation->grid_width * transformation->grid_height, sizeof(uint8_t));
-    transformation->source_used = calloc((current->width * current->height + 7) / 8, sizeof(uint8_t));
-    transformation->rlut        = malloc(transformation->rlut_limit * sizeof(int));
+    transformation->glow_prev    = calloc(transformation->grid_width * transformation->grid_height, sizeof(uint8_t));
+    transformation->glow_next    = calloc(transformation->grid_width * transformation->grid_height, sizeof(uint8_t));
+    transformation->source_used  = calloc((current->width * current->height + 7) / 8, sizeof(uint8_t));
+    transformation->rlut         = malloc(transformation->rlut_limit * sizeof(int));
+    transformation->xcell_offset = malloc((transformation->radius + 1) * sizeof(int));
     if (transformation->rlut == NULL || transformation->glow_prev == NULL || transformation->glow_next == NULL ||
-        transformation->source_used == NULL) {
+        transformation->source_used == NULL || transformation->xcell_offset == NULL) {
         dgx_screen_destroy(&transformation->vscreen);
         free(transformation->rlut);
         free(transformation->glow_prev);
         free(transformation->glow_next);
         free(transformation->source_used);
+        free(transformation->xcell_offset);
         memset(transformation, 0, sizeof(*transformation));
         return false;
     }
 
     for (int i = 0; i < transformation->rlut_limit; i++) {
         float x                 = (float)i / transformation->rlut_limit;
-        transformation->rlut[i] = 255.0f * (1 - 3 * x * x + 2 * x * x * x);
+        transformation->rlut[i] = 255.0f * (1.0f - smoothstep3(x));
+    }
+    for (int dy = 0; dy <= transformation->radius; dy++) {
+        int rem                          = transformation->rlut_limit - 1 - dy * dy;
+        transformation->xcell_offset[dy] = (rem >= 0) ? (int)sqrtf((float)rem) : -1;
     }
     return true;
 }
@@ -268,6 +280,7 @@ static void life_transformation_free(LifeTransformation *transformation)
     free(transformation->glow_prev);
     free(transformation->glow_next);
     free(transformation->source_used);
+    free(transformation->xcell_offset);
     memset(transformation, 0, sizeof(*transformation));
 }
 
@@ -288,21 +301,41 @@ Point inner_point(float t, Point start, Point end)
     return (Point){.x = start.x + (int)((end.x - start.x) * t), .y = start.y + (int)((end.y - start.y) * t)};
 }
 
+static inline uint32_t div255(uint32_t n)
+{
+    return (n + 1 + (n >> 8)) >> 8;
+}
+
 static void collect_glow(LifeTransformation *transformation, uint8_t *glow, Point point, uint8_t intensity)
 {
-    int x0 = max_int(point.x - transformation->radius, 0);
-    int x1 = min_int(point.x + transformation->radius, transformation->grid_width - 1);
+    if (intensity == 0) {
+        return;
+    }
+
     int y0 = max_int(point.y - transformation->radius, 0);
     int y1 = min_int(point.y + transformation->radius, transformation->grid_height - 1);
 
     for (int y = y0; y <= y1; y++) {
-        int dy = y - point.y;
+        int dy     = y - point.y;
+        int max_dx = transformation->xcell_offset[abs(dy)];
+        if (max_dx < 0) {
+            continue;
+        }
+
+        int x0 = max_int(point.x - max_dx, 0);
+        int x1 = min_int(point.x + max_dx, transformation->grid_width - 1);
+        if (x0 > x1) {
+            continue;
+        }
+
+        int dy2        = dy * dy;
+        int row_offset = CELL_OFFSET(0, y, transformation->grid_width);
         for (int x = x0; x <= x1; x++) {
             int dx           = x - point.x;
-            int distance     = dx * dx + dy * dy;
-            int falloff      = distance < transformation->rlut_limit ? transformation->rlut[distance] : 0;
-            int contribution = falloff * intensity / 255;
-            int idx          = CELL_OFFSET(x, y, transformation->grid_width);
+            int distance     = dx * dx + dy2;
+            int falloff      = transformation->rlut[distance];
+            int contribution = div255(falloff * intensity);
+            int idx          = row_offset + x;
             int collected    = glow[idx] + contribution;
             glow[idx]        = min_int(collected, 255);
         }
@@ -413,18 +446,24 @@ void draw_life_transformation(float t, LifeTransformation *transformation)
             }
         }
     }
+    uint8_t t_fade = max_int(0, 255 - (int16_t)(255.0f * t));
     for (int i = 0; i < faded_count; i++) {
-        collect_glow(transformation, glow_accu, faded_points[i], (uint8_t)(255.0f * (1.0f - t)));
+        collect_glow(transformation, glow_accu, faded_points[i], t_fade);
     }
     for (int i = 0; i < static_count; i++) {
         collect_glow(transformation, glow_accu, static_points[i], 255);
     }
-    float t_smooth = t * t * (3 - 2 * t);
+    float    t_smooth       = smoothstep3(t);
+    uint32_t t_fx           = (uint32_t)(256.0f * t_smooth);
+    uint8_t *direct_v_array = ((dgx_vscreen_t *)transformation->vscreen)->v_array;
     for (int y = 0; y < transformation->grid_height; y++) {
         for (int x = 0; x < transformation->grid_width; x++) {
             int     glow_idx  = CELL_OFFSET(x, y, transformation->grid_width);
-            uint8_t intensity = glow_accu[glow_idx] * t_smooth + (1.0f - t_smooth) * transformation->glow_prev[glow_idx];
-            dgx_set_pixel(transformation->vscreen, x, y, dgx_rgb_to_16(intensity, intensity, intensity));
+            uint8_t intensity = (glow_accu[glow_idx] * t_fx + (256 - t_fx) * transformation->glow_prev[glow_idx]) >> 8;
+            // dgx_set_pixel(transformation->vscreen, x, y, dgx_rgb_to_16(intensity, intensity, intensity));
+            uint16_t rgb        = DGX_RGB_16(intensity, intensity, intensity);
+            *direct_v_array++   = rgb >> 8;
+            *direct_v_array++   = rgb;
             glow_accu[glow_idx] = intensity;
         }
     }
@@ -550,8 +589,8 @@ void app_main(void)
                 restart_generation = true;
                 break;
             }
-            vTaskDelay(1);
         }
+        vTaskDelay(1); // feed the watchdog
         if (restart_generation) {
             if (step == NULL) break;
             continue;
