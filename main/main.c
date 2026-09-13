@@ -552,15 +552,14 @@ void draw_life_transformation(float t, LifeTransformation *transformation)
     }
     float    t_smooth       = smoothstep3(t);
     uint32_t t_fx           = (uint32_t)(256.0f * t_smooth);
-    uint8_t *direct_v_array = ((dgx_vscreen_t *)transformation->vscreen)->v_array;
+    uint16_t *direct_v_array = (uint16_t *)((dgx_vscreen_t *)transformation->vscreen)->v_array;
     for (int y = 0; y < transformation->grid_height; y++) {
         for (int x = 0; x < transformation->grid_width; x++) {
             int     glow_idx  = CELL_OFFSET(x, y, transformation->grid_width);
             uint8_t intensity = (glow_accu[glow_idx] * t_fx + (256 - t_fx) * transformation->glow_prev[glow_idx]) >> 8;
             // dgx_set_pixel(transformation->vscreen, x, y, dgx_rgb_to_16(intensity, intensity, intensity));
             uint16_t rgb        = DGX_RGB_16(intensity, intensity, intensity);
-            *direct_v_array++   = rgb >> 8;
-            *direct_v_array++   = rgb;
+            *direct_v_array++   = (rgb >> 8) | (rgb << 8);
             glow_accu[glow_idx] = intensity;
         }
     }
